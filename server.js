@@ -60,7 +60,7 @@ class CluedoGameServer {
     ];
   }
 
-  addPlayer(socketId, playerName) {
+  addPlayer(socketId, playerName, selectedCharacter = null) {
     if (this.players.length >= this.maxPlayers) {
       return { success: false, message: 'Stanza piena' };
     }
@@ -68,11 +68,19 @@ class CluedoGameServer {
     if (this.gameStarted) {
       return { success: false, message: 'Partita già iniziata' };
     }
+    
+    // Verifica se personaggio già scelto da altri
+    if (selectedCharacter) {
+      const characterTaken = this.players.some(p => p.character.id === selectedCharacter.id);
+      if (characterTaken) {
+        return { success: false, message: 'Personaggio già scelto da un altro giocatore' };
+      }
+    }
 
     const player = {
       id: socketId,
       name: playerName,
-      character: this.SUSPECTS[this.players.length],
+      character: selectedCharacter || this.SUSPECTS[this.players.length], // Usa personaggio scelto o assegna automaticamente
       cards: [],
       position: this.ROOMS[this.players.length % this.ROOMS.length],
       eliminated: false,
@@ -271,12 +279,14 @@ io.on('connection', (socket) => {
     const game = new CluedoGameServer(roomId, data.maxPlayers || 6);
     gameRooms.set(roomId, game);
     
-    const result = game.addPlayer(socket.id, data.playerName);
+    const result = game.addPlayer(socket.id, data.playerName, data.selectedCharacter);
     
     if (result.success) {
       socket.join(roomId);
       socket.emit('roomCreated', { roomId, player: result.player });
       io.to(roomId).emit('gameStateUpdate', game.getGameState());
+    } else {
+      socket.emit('error', { message: result.message });
     }
   });
 
@@ -288,7 +298,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const result = game.addPlayer(socket.id, data.playerName);
+    const result = game.addPlayer(socket.id, data.playerName, data.selectedCharacter);
     
     if (result.success) {
       socket.join(data.roomId);
@@ -339,7 +349,7 @@ io.on('connection', (socket) => {
       console.log(`✅ Giocatore ${data.playerName} riconnesso a ${data.roomId}`);
     } else {
       // Giocatore non trovato, prova join normale
-      const result = game.addPlayer(socket.id, data.playerName);
+      const result = game.addPlayer(socket.id, data.playerName, data.selectedCharacter);
       
       if (result.success) {
         socket.join(data.roomId);
