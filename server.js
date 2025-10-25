@@ -304,6 +304,66 @@ io.on('connection', (socket) => {
     }
   });
 
+  // NUOVO: Evento per riconnessione
+  socket.on('rejoinRoom', (data) => {
+    const game = gameRooms.get(data.roomId);
+    
+    if (!game) {
+      socket.emit('error', { message: 'Stanza non trovata' });
+      return;
+    }
+
+    // Trova giocatore disconnesso con stesso nome
+    const player = game.players.find(
+      p => p.name === data.playerName && p.disconnected
+    );
+
+    if (player) {
+      // Riconnetti giocatore
+      player.id = socket.id;
+      player.disconnected = false;
+      delete player.disconnectedAt;
+      
+      socket.join(data.roomId);
+      socket.emit('roomJoined', { 
+        roomId: data.roomId, 
+        player: player,
+        cards: game.getPlayerCards(socket.id)
+      });
+      
+      io.to(data.roomId).emit('gameStateUpdate', game.getGameState());
+      io.to(data.roomId).emit('playerRejoined', { 
+        player: { id: player.id, name: player.name }
+      });
+      
+      console.log(`✅ Giocatore ${data.playerName} riconnesso a ${data.roomId}`);
+    } else {
+      // Giocatore non trovato, prova join normale
+      const result = game.addPlayer(socket.id, data.playerName);
+      
+      if (result.success) {
+        socket.join(data.roomId);
+        socket.emit('roomJoined', { 
+          roomId: data.roomId, 
+          player: result.player,
+          cards: game.getPlayerCards(socket.id)
+        });
+        io.to(data.roomId).emit('gameStateUpdate', game.getGameState());
+        io.to(data.roomId).emit('playerJoined', { player: result.player });
+      } else {
+        socket.emit('error', { message: 'Non puoi entrare in questa stanza' });
+      }
+    }
+  });
+
+  // NUOVO: Verifica esistenza stanza
+  socket.on('checkRoom', (data) => {
+    const game = gameRooms.get(data.roomId);
+    socket.emit('roomExists', { 
+      exists: game ? true : false 
+    });
+  });
+
   socket.on('setReady', (data) => {
     const game = gameRooms.get(data.roomId);
     if (game) {
@@ -434,20 +494,45 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('Giocatore disconnesso:', socket.id);
     
-    // Rimuovi il giocatore da tutte le stanze
+    // Rimuovi da tutte le stanze con grace period di 2 minuti
     gameRooms.forEach((game, roomId) => {
-      const playerExists = game.players.some(p => p.id === socket.id);
+      const player = game.players.find(p => p.id === socket.id);
       
-      if (playerExists) {
-        game.removePlayer(socket.id);
-        io.to(roomId).emit('playerLeft', { playerId: socket.id });
-        io.to(roomId).emit('gameStateUpdate', game.getGameState());
+      if (player) {
+        // Marca come disconnesso
+        player.disconnected = true;
+        player.disconnectedAt = Date.now();
         
-        // Se la stanza è vuota, eliminala
-        if (game.players.length === 0) {
-          gameRooms.delete(roomId);
-          console.log('Stanza eliminata:', roomId);
-        }
+        io.to(roomId).emit('playerDisconnected', { 
+          playerId: socket.id,
+          playerName: player.name 
+        });
+        
+        // Aspetta 2 minuti prima di rimuovere definitivamente
+        setTimeout(() => {
+          const stillDisconnected = game.players.find(
+            p => p.id === socket.id && p.disconnected
+          );
+          
+          if (stillDisconnected) {
+            game.removePlayer(socket.id);
+            io.to(roomId).emit('playerLeft', { playerId: socket.id });
+            io.to(roomId).emit('gameStateUpdate', game.getGameState());
+            
+            console.log(`Giocatore ${socket.id} rimosso dopo timeout`);
+            
+            // Se stanza vuota, eliminala
+            if (game.players.length === 0) {
+              gameRooms.delete(roomId);
+              console.log('Stanza eliminata:', roomId);
+            }
+          }
+        }, 120000); // 2 minuti = 120000ms
+        
+        // Cambia questo valore per modificare durata:
+        // 60000 = 1 minuto
+        // 180000 = 3 minuti
+        // 300000 = 5 minuti
       }
     });
   });
