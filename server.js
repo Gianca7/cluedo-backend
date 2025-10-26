@@ -1,558 +1,551 @@
+// ========================================
+// CLUEDO ONLINE - Server Backend v2.0
+// ========================================
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
-const path = require('path');
+const cors = require('cors');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  },
-  transports: ['websocket', 'polling']  // ← AGGIUNGI QUESTA
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
 });
-// Serve static files
-app.use(express.static(path.join(__dirname, 'public')));
 
-// Game rooms storage
+app.use(cors());
+app.use(express.static('public'));
+
+const PORT = process.env.PORT || 3000;
+
+// ========================================
+// DATI DEL GIOCO
+// ========================================
+
+const SUSPECTS = [
+    'Miss Scarlett', 'Col. Mustard', 'Mrs. White',
+    'Rev. Green', 'Mrs. Peacock', 'Prof. Plum'
+];
+
+const WEAPONS = [
+    '🕯️ Candeliere', '🔪 Pugnale', '🔧 Tubo',
+    '🔫 Revolver', '🪢 Corda', '🔨 Chiave inglese'
+];
+
+const ROOMS = [
+    'Sala da ballo', 'Sala biliardo', 'Biblioteca',
+    'Sala da pranzo', 'Sala', 'Salotto',
+    'Cucina', 'Studio', 'Serra'
+];
+
+// Stanze attive
 const gameRooms = new Map();
 
-class CluedoGameServer {
-  constructor(roomId, maxPlayers = 6) {
-    this.roomId = roomId;
-    this.maxPlayers = maxPlayers;
-    this.players = [];
-    this.solution = null;
-    this.currentPlayerIndex = 0;
-    this.gameStarted = false;
-    this.gameOver = false;
-    this.winner = null;
-    
-    this.SUSPECTS = [
-      { id: 'scarlett', name: 'Miss Scarlett', color: '#DC143C' },
-      { id: 'mustard', name: 'Col. Mustard', color: '#FFD700' },
-      { id: 'white', name: 'Mrs. White', color: '#FFFFFF' },
-      { id: 'green', name: 'Rev. Green', color: '#228B22' },
-      { id: 'peacock', name: 'Mrs. Peacock', color: '#4169E1' },
-      { id: 'plum', name: 'Prof. Plum', color: '#8B008B' }
-    ];
+// ========================================
+// UTILITY FUNCTIONS
+// ========================================
 
-    this.WEAPONS = [
-      { id: 'candlestick', name: 'Candeliere', icon: '🕯️' },
-      { id: 'knife', name: 'Pugnale', icon: '🔪' },
-      { id: 'pipe', name: 'Tubo', icon: '🔧' },
-      { id: 'revolver', name: 'Revolver', icon: '🔫' },
-      { id: 'rope', name: 'Corda', icon: '🪢' },
-      { id: 'wrench', name: 'Chiave inglese', icon: '🔨' }
-    ];
-
-    this.ROOMS = [
-      { id: 'kitchen', name: 'Cucina', position: [-3, 0, 3], color: '#FF6347' },
-      { id: 'ballroom', name: 'Sala da ballo', position: [0, 0, 3], color: '#FFD700' },
-      { id: 'conservatory', name: 'Serra', position: [3, 0, 3], color: '#32CD32' },
-      { id: 'dining', name: 'Sala da pranzo', position: [-3, 0, 0], color: '#DC143C' },
-      { id: 'billiard', name: 'Sala biliardo', position: [3, 0, 0], color: '#2E8B57' },
-      { id: 'library', name: 'Biblioteca', position: [-3, 0, -3], color: '#8B4513' },
-      { id: 'lounge', name: 'Salotto', position: [0, 0, -3], color: '#8B008B' },
-      { id: 'hall', name: 'Sala', position: [3, 0, -3], color: '#4169E1' },
-      { id: 'study', name: 'Studio', position: [0, 0, 0], color: '#696969' }
-    ];
-  }
-
-  addPlayer(socketId, playerName, selectedCharacter = null) {
-    if (this.players.length >= this.maxPlayers) {
-      return { success: false, message: 'Stanza piena' };
-    }
-
-    if (this.gameStarted) {
-      return { success: false, message: 'Partita già iniziata' };
-    }
-    
-    // Verifica se personaggio già scelto da altri
-    if (selectedCharacter) {
-      const characterTaken = this.players.some(p => p.character.id === selectedCharacter.id);
-      if (characterTaken) {
-        return { success: false, message: 'Personaggio già scelto da un altro giocatore' };
-      }
-    }
-
-    const player = {
-      id: socketId,
-      name: playerName,
-      character: selectedCharacter || this.SUSPECTS[this.players.length], // Usa personaggio scelto o assegna automaticamente
-      cards: [],
-      position: this.ROOMS[this.players.length % this.ROOMS.length],
-      eliminated: false,
-      isReady: false
-    };
-
-    this.players.push(player);
-    return { success: true, player };
-  }
-
-  removePlayer(socketId) {
-    const index = this.players.findIndex(p => p.id === socketId);
-    if (index !== -1) {
-      this.players.splice(index, 1);
-      
-      // Se il gioco era iniziato e rimangono meno di 2 giocatori, termina
-      if (this.gameStarted && this.players.length < 2) {
-        this.gameOver = true;
-        if (this.players.length === 1) {
-          this.winner = this.players[0];
-        }
-      }
-    }
-  }
-
-  setPlayerReady(socketId, ready) {
-    const player = this.players.find(p => p.id === socketId);
-    if (player) {
-      player.isReady = ready;
-    }
-  }
-
-  canStartGame() {
-    return this.players.length >= 2 && 
-           this.players.every(p => p.isReady) && 
-           !this.gameStarted;
-  }
-
-  startGame() {
-    if (!this.canStartGame()) {
-      return { success: false, message: 'Non tutti i giocatori sono pronti' };
-    }
-
-    // Crea soluzione
-    this.solution = {
-      suspect: this.SUSPECTS[Math.floor(Math.random() * this.SUSPECTS.length)],
-      weapon: this.WEAPONS[Math.floor(Math.random() * this.WEAPONS.length)],
-      room: this.ROOMS[Math.floor(Math.random() * this.ROOMS.length)]
-    };
-
-    // Crea mazzo
-    const deck = [
-      ...this.SUSPECTS.filter(s => s.id !== this.solution.suspect.id),
-      ...this.WEAPONS.filter(w => w.id !== this.solution.weapon.id),
-      ...this.ROOMS.filter(r => r.id !== this.solution.room.id)
-    ];
-
-    // Mescola
-    this.shuffle(deck);
-
-    // Distribuisci carte
-    deck.forEach((card, index) => {
-      const playerIndex = index % this.players.length;
-      this.players[playerIndex].cards.push(card);
-    });
-
-    this.gameStarted = true;
-    this.currentPlayerIndex = 0;
-
-    return { success: true };
-  }
-
-  shuffle(array) {
-    for (let i = array.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [array[i], array[j]] = [array[j], array[i]];
-    }
-  }
-
-  getCurrentPlayer() {
-    return this.players[this.currentPlayerIndex];
-  }
-
-  moveToRoom(socketId, roomId) {
-    const player = this.players.find(p => p.id === socketId);
-    const room = this.ROOMS.find(r => r.id === roomId);
-    
-    if (player && room && player.id === this.getCurrentPlayer().id) {
-      player.position = room;
-      return { success: true, room };
-    }
-    
-    return { success: false, message: 'Non è il tuo turno o stanza non valida' };
-  }
-
-  makeSuggestion(socketId, suspect, weapon, room) {
-    const currentPlayer = this.getCurrentPlayer();
-    
-    if (socketId !== currentPlayer.id) {
-      return { success: false, message: 'Non è il tuo turno' };
-    }
-
-    // Controlla confutazioni
-    for (let i = 1; i < this.players.length; i++) {
-      const playerIndex = (this.currentPlayerIndex + i) % this.players.length;
-      const player = this.players[playerIndex];
-      
-      if (player.eliminated) continue;
-
-      const refutingCards = player.cards.filter(card => 
-        card.id === suspect.id || card.id === weapon.id || card.id === room.id
-      );
-
-      if (refutingCards.length > 0) {
-        const cardToShow = refutingCards[Math.floor(Math.random() * refutingCards.length)];
-        return {
-          success: true,
-          refuted: true,
-          player: { id: player.id, name: player.name },
-          card: cardToShow
-        };
-      }
-    }
-
-    return { success: true, refuted: false };
-  }
-
-  makeAccusation(socketId, suspect, weapon, room) {
-    const currentPlayer = this.getCurrentPlayer();
-    
-    if (socketId !== currentPlayer.id) {
-      return { success: false, message: 'Non è il tuo turno' };
-    }
-
-    const correct = 
-      suspect.id === this.solution.suspect.id &&
-      weapon.id === this.solution.weapon.id &&
-      room.id === this.solution.room.id;
-
-    if (correct) {
-      this.gameOver = true;
-      this.winner = currentPlayer;
-    } else {
-      currentPlayer.eliminated = true;
-      
-      const activePlayers = this.players.filter(p => !p.eliminated);
-      if (activePlayers.length === 1) {
-        this.gameOver = true;
-        this.winner = activePlayers[0];
-      }
-    }
-
-    return { success: true, correct, gameOver: this.gameOver, winner: this.winner };
-  }
-
-  nextTurn() {
-    do {
-      this.currentPlayerIndex = (this.currentPlayerIndex + 1) % this.players.length;
-    } while (this.getCurrentPlayer().eliminated && !this.gameOver);
-    
-    return this.getCurrentPlayer();
-  }
-
-  getGameState() {
-    return {
-      roomId: this.roomId,
-      players: this.players.map(p => ({
-        id: p.id,
-        name: p.name,
-        character: p.character,
-        position: p.position,
-        eliminated: p.eliminated,
-        isReady: p.isReady,
-        cardCount: p.cards.length
-      })),
-      currentPlayerIndex: this.currentPlayerIndex,
-      gameStarted: this.gameStarted,
-      gameOver: this.gameOver,
-      winner: this.winner,
-      solution: this.gameOver ? this.solution : null
-    };
-  }
-
-  getPlayerCards(socketId) {
-    const player = this.players.find(p => p.id === socketId);
-    return player ? player.cards : [];
-  }
+function generateRoomCode() {
+    return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// Socket.io connection handling
+function shuffleArray(array) {
+    const shuffled = [...array];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+}
+
+function createDeck() {
+    // Crea soluzione segreta
+    const solution = {
+        suspect: SUSPECTS[Math.floor(Math.random() * SUSPECTS.length)],
+        weapon: WEAPONS[Math.floor(Math.random() * WEAPONS.length)],
+        room: ROOMS[Math.floor(Math.random() * ROOMS.length)]
+    };
+    
+    // Carte rimanenti
+    const remainingCards = [
+        ...SUSPECTS.filter(s => s !== solution.suspect),
+        ...WEAPONS.filter(w => w !== solution.weapon),
+        ...ROOMS.filter(r => r !== solution.room)
+    ];
+    
+    return { solution, remainingCards: shuffleArray(remainingCards) };
+}
+
+function distributeCards(cards, numPlayers) {
+    const hands = Array(numPlayers).fill(null).map(() => []);
+    cards.forEach((card, index) => {
+        hands[index % numPlayers].push(card);
+    });
+    return hands;
+}
+
+// ========================================
+// SOCKET.IO HANDLERS
+// ========================================
+
 io.on('connection', (socket) => {
-  console.log('Nuovo giocatore connesso:', socket.id);
-
-  socket.on('createRoom', (data) => {
-    const roomId = generateRoomId();
-    const game = new CluedoGameServer(roomId, data.maxPlayers || 6);
-    gameRooms.set(roomId, game);
+    console.log(`✅ Utente connesso: ${socket.id}`);
     
-    const result = game.addPlayer(socket.id, data.playerName, data.selectedCharacter);
+    // ========================================
+    // LOBBY
+    // ========================================
     
-    if (result.success) {
-      socket.join(roomId);
-      socket.emit('roomCreated', { roomId, player: result.player });
-      io.to(roomId).emit('gameStateUpdate', game.getGameState());
-    } else {
-      socket.emit('error', { message: result.message });
-    }
-  });
-
-  socket.on('joinRoom', (data) => {
-    const game = gameRooms.get(data.roomId);
-    
-    if (!game) {
-      socket.emit('error', { message: 'Stanza non trovata' });
-      return;
-    }
-
-    const result = game.addPlayer(socket.id, data.playerName, data.selectedCharacter);
-    
-    if (result.success) {
-      socket.join(data.roomId);
-      socket.emit('roomJoined', { 
-        roomId: data.roomId, 
-        player: result.player,
-        cards: game.getPlayerCards(socket.id)
-      });
-      io.to(data.roomId).emit('gameStateUpdate', game.getGameState());
-      io.to(data.roomId).emit('playerJoined', { player: result.player });
-    } else {
-      socket.emit('error', { message: result.message });
-    }
-  });
-
-  // NUOVO: Evento per riconnessione
-  socket.on('rejoinRoom', (data) => {
-    const game = gameRooms.get(data.roomId);
-    
-    if (!game) {
-      socket.emit('error', { message: 'Stanza non trovata' });
-      return;
-    }
-
-    // Trova giocatore disconnesso con stesso nome
-    const player = game.players.find(
-      p => p.name === data.playerName && p.disconnected
-    );
-
-    if (player) {
-      // Riconnetti giocatore
-      player.id = socket.id;
-      player.disconnected = false;
-      delete player.disconnectedAt;
-      
-      socket.join(data.roomId);
-      socket.emit('roomJoined', { 
-        roomId: data.roomId, 
-        player: player,
-        cards: game.getPlayerCards(socket.id)
-      });
-      
-      io.to(data.roomId).emit('gameStateUpdate', game.getGameState());
-      io.to(data.roomId).emit('playerRejoined', { 
-        player: { id: player.id, name: player.name }
-      });
-      
-      console.log(`✅ Giocatore ${data.playerName} riconnesso a ${data.roomId}`);
-    } else {
-      // Giocatore non trovato, prova join normale
-      const result = game.addPlayer(socket.id, data.playerName, data.selectedCharacter);
-      
-      if (result.success) {
-        socket.join(data.roomId);
-        socket.emit('roomJoined', { 
-          roomId: data.roomId, 
-          player: result.player,
-          cards: game.getPlayerCards(socket.id)
-        });
-        io.to(data.roomId).emit('gameStateUpdate', game.getGameState());
-        io.to(data.roomId).emit('playerJoined', { player: result.player });
-      } else {
-        socket.emit('error', { message: 'Non puoi entrare in questa stanza' });
-      }
-    }
-  });
-
-  // NUOVO: Verifica esistenza stanza
-  socket.on('checkRoom', (data) => {
-    const game = gameRooms.get(data.roomId);
-    socket.emit('roomExists', { 
-      exists: game ? true : false 
+    socket.on('createRoom', (data) => {
+        const roomCode = generateRoomCode();
+        const room = {
+            code: roomCode,
+            host: socket.id,
+            players: [{
+                id: socket.id,
+                name: data.name,
+                character: data.character,
+                ready: false,
+                position: { x: 0, y: 0, z: 0 },
+                currentRoom: null,
+                cards: [],
+                active: true,
+                diceRoll: null,
+                movesRemaining: 0
+            }],
+            gameStarted: false,
+            solution: null,
+            currentTurnIndex: 0,
+            deck: null
+        };
+        
+        gameRooms.set(roomCode, room);
+        socket.join(roomCode);
+        
+        socket.emit('roomCreated', { roomCode });
+        console.log(`🎮 Stanza creata: ${roomCode} da ${data.name}`);
     });
-  });
-
-  socket.on('setReady', (data) => {
-    const game = gameRooms.get(data.roomId);
-    if (game) {
-      game.setPlayerReady(socket.id, data.ready);
-      io.to(data.roomId).emit('gameStateUpdate', game.getGameState());
-      
-      if (game.canStartGame()) {
-        io.to(data.roomId).emit('canStartGame', true);
-      }
-    }
-  });
-
-  socket.on('startGame', (data) => {
-    const game = gameRooms.get(data.roomId);
-    if (game) {
-      const result = game.startGame();
-      
-      if (result.success) {
-        // Invia a ogni giocatore le sue carte
-        game.players.forEach(player => {
-          io.to(player.id).emit('gameStarted', {
-            cards: game.getPlayerCards(player.id)
-          });
-        });
-        
-        io.to(data.roomId).emit('gameStateUpdate', game.getGameState());
-        io.to(data.roomId).emit('turnStart', game.getCurrentPlayer());
-      } else {
-        socket.emit('error', { message: result.message });
-      }
-    }
-  });
-
-  socket.on('moveToRoom', (data) => {
-    const game = gameRooms.get(data.roomId);
-    if (game) {
-      const result = game.moveToRoom(socket.id, data.targetRoomId);
-      
-      if (result.success) {
-        io.to(data.roomId).emit('playerMoved', {
-          playerId: socket.id,
-          room: result.room
-        });
-        io.to(data.roomId).emit('gameStateUpdate', game.getGameState());
-      } else {
-        socket.emit('error', { message: result.message });
-      }
-    }
-  });
-
-  socket.on('makeSuggestion', (data) => {
-    const game = gameRooms.get(data.roomId);
-    if (game) {
-      const result = game.makeSuggestion(
-        socket.id,
-        data.suspect,
-        data.weapon,
-        data.room
-      );
-      
-      if (result.success) {
-        if (result.refuted) {
-          // Solo il giocatore corrente vede la carta
-          socket.emit('suggestionRefuted', {
-            player: result.player,
-            card: result.card
-          });
-          
-          // Altri vedono solo che è stata confutata
-          socket.to(data.roomId).emit('suggestionRefutedPublic', {
-            player: result.player
-          });
-        } else {
-          io.to(data.roomId).emit('suggestionNotRefuted');
-        }
-        
-        io.to(data.roomId).emit('gameLog', {
-          message: `${game.getCurrentPlayer().name} ha fatto un'ipotesi`,
-          type: 'suggestion'
-        });
-      } else {
-        socket.emit('error', { message: result.message });
-      }
-    }
-  });
-
-  socket.on('makeAccusation', (data) => {
-    const game = gameRooms.get(data.roomId);
-    if (game) {
-      const result = game.makeAccusation(
-        socket.id,
-        data.suspect,
-        data.weapon,
-        data.room
-      );
-      
-      if (result.success) {
-        io.to(data.roomId).emit('accusationMade', {
-          player: game.getCurrentPlayer(),
-          correct: result.correct,
-          gameOver: result.gameOver,
-          winner: result.winner
-        });
-        
-        io.to(data.roomId).emit('gameStateUpdate', game.getGameState());
-        
-        if (result.gameOver) {
-          io.to(data.roomId).emit('gameOver', {
-            winner: result.winner,
-            solution: game.solution
-          });
-        }
-      } else {
-        socket.emit('error', { message: result.message });
-      }
-    }
-  });
-
-  socket.on('endTurn', (data) => {
-    const game = gameRooms.get(data.roomId);
-    if (game) {
-      const nextPlayer = game.nextTurn();
-      io.to(data.roomId).emit('gameStateUpdate', game.getGameState());
-      io.to(data.roomId).emit('turnStart', nextPlayer);
-    }
-  });
-
-  socket.on('disconnect', () => {
-    console.log('Giocatore disconnesso:', socket.id);
     
-    // Rimuovi da tutte le stanze con grace period di 2 minuti
-    gameRooms.forEach((game, roomId) => {
-      const player = game.players.find(p => p.id === socket.id);
-      
-      if (player) {
-        // Marca come disconnesso
-        player.disconnected = true;
-        player.disconnectedAt = Date.now();
+    socket.on('joinRoom', (data) => {
+        const room = gameRooms.get(data.roomCode);
         
-        io.to(roomId).emit('playerDisconnected', { 
-          playerId: socket.id,
-          playerName: player.name 
+        if (!room) {
+            socket.emit('error', { message: 'Stanza non trovata' });
+            return;
+        }
+        
+        if (room.gameStarted) {
+            socket.emit('error', { message: 'Partita già iniziata' });
+            return;
+        }
+        
+        if (room.players.length >= 6) {
+            socket.emit('error', { message: 'Stanza piena' });
+            return;
+        }
+        
+        // Verifica personaggio non già scelto
+        const characterTaken = room.players.some(p => p.character === data.character);
+        if (characterTaken) {
+            socket.emit('error', { message: 'Personaggio già scelto da un altro giocatore' });
+            return;
+        }
+        
+        const player = {
+            id: socket.id,
+            name: data.name,
+            character: data.character,
+            ready: false,
+            position: { x: 0, y: 0, z: 0 },
+            currentRoom: null,
+            cards: [],
+            active: true,
+            diceRoll: null,
+            movesRemaining: 0
+        };
+        
+        room.players.push(player);
+        socket.join(data.roomCode);
+        
+        socket.emit('roomJoined', { roomCode: data.roomCode, players: room.players });
+        socket.to(data.roomCode).emit('playerJoined', {
+            playerName: data.name,
+            players: room.players
         });
         
-        // Aspetta 2 minuti prima di rimuovere definitivamente
-        setTimeout(() => {
-          const stillDisconnected = game.players.find(
-            p => p.id === socket.id && p.disconnected
-          );
-          
-          if (stillDisconnected) {
-            game.removePlayer(socket.id);
-            io.to(roomId).emit('playerLeft', { playerId: socket.id });
-            io.to(roomId).emit('gameStateUpdate', game.getGameState());
+        console.log(`👤 ${data.name} è entrato in ${data.roomCode}`);
+    });
+    
+    socket.on('playerReady', (data) => {
+        const room = gameRooms.get(data.roomCode);
+        if (!room) return;
+        
+        const player = room.players.find(p => p.id === socket.id);
+        if (player) {
+            player.ready = true;
             
-            console.log(`Giocatore ${socket.id} rimosso dopo timeout`);
+            io.to(data.roomCode).emit('playerJoined', {
+                playerName: player.name,
+                players: room.players
+            });
             
-            // Se stanza vuota, eliminala
-            if (game.players.length === 0) {
-              gameRooms.delete(roomId);
-              console.log('Stanza eliminata:', roomId);
+            // Se tutti pronti e almeno 2 giocatori, inizia partita
+            const allReady = room.players.every(p => p.ready);
+            if (allReady && room.players.length >= 2) {
+                startGame(data.roomCode);
             }
-          }
-        }, 120000); // 2 minuti = 120000ms
-        
-        // Cambia questo valore per modificare durata:
-        // 60000 = 1 minuto
-        // 180000 = 3 minuti
-        // 300000 = 5 minuti
-      }
+        }
     });
-  });
+    
+    socket.on('leaveRoom', (data) => {
+        const room = gameRooms.get(data.roomCode);
+        if (!room) return;
+        
+        const playerIndex = room.players.findIndex(p => p.id === socket.id);
+        if (playerIndex !== -1) {
+            const player = room.players[playerIndex];
+            room.players.splice(playerIndex, 1);
+            socket.leave(data.roomCode);
+            
+            socket.to(data.roomCode).emit('playerLeft', {
+                playerName: player.name,
+                players: room.players
+            });
+            
+            // Se nessuno rimane, elimina stanza
+            if (room.players.length === 0) {
+                gameRooms.delete(data.roomCode);
+                console.log(`🗑️ Stanza ${data.roomCode} eliminata`);
+            }
+        }
+    });
+    
+    // ========================================
+    // GAME LOGIC
+    // ========================================
+    
+    function startGame(roomCode) {
+        const room = gameRooms.get(roomCode);
+        if (!room) return;
+        
+        console.log(`🎮 Partita iniziata in ${roomCode}`);
+        
+        // Crea mazzo e soluzione
+        const { solution, remainingCards } = createDeck();
+        room.solution = solution;
+        
+        // Distribuisci carte
+        const hands = distributeCards(remainingCards, room.players.length);
+        room.players.forEach((player, index) => {
+            player.cards = hands[index];
+        });
+        
+        room.gameStarted = true;
+        room.currentTurnIndex = 0;
+        
+        // Invia dati iniziali a ogni giocatore
+        room.players.forEach(player => {
+            io.to(player.id).emit('gameStart', {
+                cards: player.cards,
+                players: room.players.map(p => ({
+                    id: p.id,
+                    name: p.name,
+                    character: p.character
+                }))
+            });
+        });
+        
+        // Inizia primo turno
+        setTimeout(() => startTurn(roomCode), 2000);
+    }
+    
+    function startTurn(roomCode) {
+        const room = gameRooms.get(roomCode);
+        if (!room) return;
+        
+        // Salta giocatori eliminati
+        while (!room.players[room.currentTurnIndex].active) {
+            room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+        }
+        
+        const currentPlayer = room.players[room.currentTurnIndex];
+        
+        io.to(roomCode).emit('turnStart', {
+            playerId: currentPlayer.id,
+            playerName: currentPlayer.name
+        });
+        
+        console.log(`🎲 Turno di ${currentPlayer.name} in ${roomCode}`);
+    }
+    
+    socket.on('rollDice', (data) => {
+        const room = gameRooms.get(data.roomCode);
+        if (!room) return;
+        
+        const currentPlayer = room.players[room.currentTurnIndex];
+        if (currentPlayer.id !== socket.id) {
+            socket.emit('error', { message: 'Non è il tuo turno' });
+            return;
+        }
+        
+        if (currentPlayer.diceRoll) {
+            socket.emit('error', { message: 'Hai già tirato il dado' });
+            return;
+        }
+        
+        const diceResult = Math.floor(Math.random() * 6) + 1;
+        currentPlayer.diceRoll = diceResult;
+        currentPlayer.movesRemaining = diceResult;
+        
+        io.to(data.roomCode).emit('diceRolled', {
+            playerId: socket.id,
+            playerName: currentPlayer.name,
+            result: diceResult
+        });
+        
+        console.log(`🎲 ${currentPlayer.name} ha tirato: ${diceResult}`);
+    });
+    
+    socket.on('movePlayer', (data) => {
+        const room = gameRooms.get(data.roomCode);
+        if (!room) return;
+        
+        const currentPlayer = room.players[room.currentTurnIndex];
+        if (currentPlayer.id !== socket.id) {
+            socket.emit('error', { message: 'Non è il tuo turno' });
+            return;
+        }
+        
+        if (!currentPlayer.diceRoll) {
+            socket.emit('error', { message: 'Devi prima tirare il dado' });
+            return;
+        }
+        
+        // Calcola distanza
+        const distance = calculateDistance(currentPlayer.position, data.newPosition);
+        const moveCost = Math.ceil(distance / 5);
+        
+        if (moveCost > currentPlayer.movesRemaining) {
+            socket.emit('error', { message: 'Non hai abbastanza movimento' });
+            return;
+        }
+        
+        currentPlayer.position = data.newPosition;
+        currentPlayer.currentRoom = data.roomId;
+        currentPlayer.movesRemaining = 0;
+        
+        const roomName = ROOMS.find(r => r === data.roomId) || data.roomId;
+        
+        io.to(data.roomCode).emit('playerMoved', {
+            playerId: socket.id,
+            playerName: currentPlayer.name,
+            newPosition: data.newPosition,
+            roomId: data.roomId,
+            roomName: roomName
+        });
+        
+        console.log(`🚶 ${currentPlayer.name} si è mosso in ${roomName}`);
+    });
+    
+    socket.on('makeHypothesis', (data) => {
+        const room = gameRooms.get(data.roomCode);
+        if (!room) return;
+        
+        const currentPlayer = room.players[room.currentTurnIndex];
+        if (currentPlayer.id !== socket.id) {
+            socket.emit('error', { message: 'Non è il tuo turno' });
+            return;
+        }
+        
+        if (!currentPlayer.currentRoom) {
+            socket.emit('error', { message: 'Devi essere in una stanza' });
+            return;
+        }
+        
+        io.to(data.roomCode).emit('hypothesisMade', {
+            playerName: currentPlayer.name,
+            suspect: data.suspect,
+            weapon: data.weapon,
+            room: data.room
+        });
+        
+        console.log(`🔍 Ipotesi di ${currentPlayer.name}: ${data.suspect}, ${data.weapon}, ${data.room}`);
+        
+        // Verifica confutazione
+        const hypothesis = [data.suspect, data.weapon, data.room];
+        let refuted = false;
+        
+        // Controlla giocatori in senso orario
+        for (let i = 1; i < room.players.length; i++) {
+            const nextIndex = (room.currentTurnIndex + i) % room.players.length;
+            const player = room.players[nextIndex];
+            
+            if (!player.active) continue;
+            
+            const matchingCards = player.cards.filter(card => hypothesis.includes(card));
+            
+            if (matchingCards.length > 0) {
+                const cardToShow = matchingCards[0];
+                
+                io.to(data.roomCode).emit('hypothesisRefuted', {
+                    refuterName: player.name
+                });
+                
+                io.to(socket.id).emit('cardShown', {
+                    from: player.name,
+                    to: socket.id,
+                    card: cardToShow
+                });
+                
+                console.log(`❌ ${player.name} ha confutato con: ${cardToShow}`);
+                
+                refuted = true;
+                break;
+            }
+        }
+        
+        if (!refuted) {
+            io.to(data.roomCode).emit('hypothesisNotRefuted');
+            console.log(`✅ Nessuno ha confutato l'ipotesi`);
+        }
+        
+        // Passa al prossimo turno
+        endTurn(data.roomCode);
+    });
+    
+    socket.on('makeAccusation', (data) => {
+        const room = gameRooms.get(data.roomCode);
+        if (!room) return;
+        
+        const currentPlayer = room.players[room.currentTurnIndex];
+        if (currentPlayer.id !== socket.id) {
+            socket.emit('error', { message: 'Non è il tuo turno' });
+            return;
+        }
+        
+        const correct = (
+            data.suspect === room.solution.suspect &&
+            data.weapon === room.solution.weapon &&
+            data.room === room.solution.room
+        );
+        
+        if (correct) {
+            io.to(data.roomCode).emit('accusationMade', {
+                playerId: socket.id,
+                playerName: currentPlayer.name,
+                suspect: data.suspect,
+                weapon: data.weapon,
+                room: data.room,
+                correct: true
+            });
+            
+            io.to(data.roomCode).emit('gameOver', {
+                winner: currentPlayer.name,
+                solution: room.solution
+            });
+            
+            console.log(`🎉 ${currentPlayer.name} ha vinto!`);
+            
+            // Elimina stanza dopo 30 secondi
+            setTimeout(() => {
+                gameRooms.delete(data.roomCode);
+                console.log(`🗑️ Stanza ${data.roomCode} eliminata`);
+            }, 30000);
+            
+        } else {
+            currentPlayer.active = false;
+            
+            io.to(data.roomCode).emit('accusationMade', {
+                playerId: socket.id,
+                playerName: currentPlayer.name,
+                suspect: data.suspect,
+                weapon: data.weapon,
+                room: data.room,
+                correct: false
+            });
+            
+            console.log(`❌ ${currentPlayer.name} eliminato per accusa sbagliata`);
+            
+            // Controlla se rimane solo un giocatore
+            const activePlayers = room.players.filter(p => p.active);
+            if (activePlayers.length === 1) {
+                io.to(data.roomCode).emit('gameOver', {
+                    winner: activePlayers[0].name,
+                    solution: room.solution
+                });
+                
+                setTimeout(() => {
+                    gameRooms.delete(data.roomCode);
+                }, 30000);
+                
+            } else {
+                endTurn(data.roomCode);
+            }
+        }
+    });
+    
+    function endTurn(roomCode) {
+        const room = gameRooms.get(roomCode);
+        if (!room) return;
+        
+        // Reset stato turno corrente
+        const currentPlayer = room.players[room.currentTurnIndex];
+        currentPlayer.diceRoll = null;
+        currentPlayer.movesRemaining = 0;
+        
+        // Passa al prossimo giocatore
+        room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+        
+        setTimeout(() => startTurn(roomCode), 2000);
+    }
+    
+    function calculateDistance(pos1, pos2) {
+        const dx = pos2.x - pos1.x;
+        const dz = pos2.z - pos1.z;
+        return Math.sqrt(dx * dx + dz * dz);
+    }
+    
+    // ========================================
+    // DISCONNECT
+    // ========================================
+    
+    socket.on('disconnect', () => {
+        console.log(`❌ Utente disconnesso: ${socket.id}`);
+        
+        // Rimuovi da tutte le stanze
+        gameRooms.forEach((room, roomCode) => {
+            const playerIndex = room.players.findIndex(p => p.id === socket.id);
+            if (playerIndex !== -1) {
+                const player = room.players[playerIndex];
+                room.players.splice(playerIndex, 1);
+                
+                io.to(roomCode).emit('playerLeft', {
+                    playerName: player.name,
+                    players: room.players
+                });
+                
+                if (room.players.length === 0) {
+                    gameRooms.delete(roomCode);
+                    console.log(`🗑️ Stanza ${roomCode} eliminata`);
+                }
+            }
+        });
+    });
 });
 
-function generateRoomId() {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
-}
+// ========================================
+// SERVER START
+// ========================================
 
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server Cluedo online sulla porta ${PORT}`);
+server.listen(PORT, () => {
+    console.log(`
+╔═══════════════════════════════════════╗
+║   🕵️  CLUEDO ONLINE SERVER v2.0      ║
+╠═══════════════════════════════════════╣
+║   Server running on port ${PORT}       ║
+║   Ready for connections!              ║
+╚═══════════════════════════════════════╝
+    `);
 });
