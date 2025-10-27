@@ -223,6 +223,98 @@ io.on('connection', (socket) => {
     });
     
     // ========================================
+    // REQUEST GAME STATE (per riconnessioni)
+    // ========================================
+    
+    socket.on('rejoinRoom', (data) => {
+        const room = gameRooms.get(data.roomCode);
+        if (!room) {
+            socket.emit('error', { message: 'Stanza non trovata' });
+            return;
+        }
+        
+        // Cerca il giocatore per nome e character invece che per socket.id
+        const player = room.players.find(p => 
+            p.name === data.playerName && p.character === data.playerCharacter
+        );
+        
+        if (!player) {
+            socket.emit('error', { message: 'Giocatore non trovato nella stanza' });
+            return;
+        }
+        
+        console.log(`🔄 ${player.name} si riconnette con nuovo socket ${socket.id} (vecchio: ${player.id})`);
+        
+        // Aggiorna socket.id del giocatore
+        player.id = socket.id;
+        socket.join(data.roomCode);
+        
+        // Se il gioco è già iniziato, invia lo stato corrente
+        if (room.gameStarted) {
+            // Invia le carte del giocatore
+            socket.emit('gameStart', {
+                cards: player.cards,
+                players: room.players.map(p => ({
+                    id: p.id,
+                    name: p.name,
+                    character: p.character
+                }))
+            });
+            
+            // Invia chi è il turno corrente
+            const currentPlayer = room.players[room.currentTurnIndex];
+            socket.emit('turnStart', {
+                playerId: currentPlayer.id,
+                playerName: currentPlayer.name
+            });
+            
+            console.log(`✅ ${player.name} riconnesso, stato inviato`);
+        } else {
+            socket.emit('error', { message: 'Il gioco non è ancora iniziato' });
+        }
+    });
+    
+    socket.on('requestGameState', (data) => {
+        const room = gameRooms.get(data.roomCode);
+        if (!room) {
+            socket.emit('error', { message: 'Stanza non trovata' });
+            return;
+        }
+        
+        const player = room.players.find(p => p.id === socket.id);
+        if (!player) {
+            socket.emit('error', { message: 'Giocatore non trovato nella stanza' });
+            return;
+        }
+        
+        console.log(`🔄 ${player.name} richiede stato gioco in ${data.roomCode}`);
+        
+        // Se il gioco è già iniziato, invia lo stato corrente
+        if (room.gameStarted) {
+            // Invia le carte del giocatore
+            socket.emit('gameStart', {
+                cards: player.cards,
+                players: room.players.map(p => ({
+                    id: p.id,
+                    name: p.name,
+                    character: p.character
+                }))
+            });
+            
+            // Invia chi è il turno corrente
+            const currentPlayer = room.players[room.currentTurnIndex];
+            socket.emit('turnStart', {
+                playerId: currentPlayer.id,
+                playerName: currentPlayer.name
+            });
+            
+            console.log(`✅ Stato inviato a ${player.name}`);
+        } else {
+            socket.emit('error', { message: 'Il gioco non è ancora iniziato' });
+        }
+    });
+    
+    // ========================================
     // GAME LOGIC
     // ========================================
     
