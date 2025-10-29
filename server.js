@@ -18,6 +18,32 @@ const io = socketIo(server, {
 
 app.use(cors());
 app.use(express.static('public'));
+app.use(express.json());
+
+// Endpoint per resettare la stanza globale
+app.post('/api/reset-room', (req, res) => {
+    console.log('🔄 Reset stanza globale richiesto...');
+    
+    gameRoom.players = [];
+    gameRoom.solution = null;
+    gameRoom.gameStarted = false;
+    gameRoom.currentTurnIndex = 0;
+    
+    // Disconnetti tutti i client
+    io.to(GLOBAL_ROOM).disconnectSockets();
+    
+    console.log('✅ Stanza globale resettata!');
+    res.json({ success: true, message: 'Stanza resettata!' });
+});
+
+// Endpoint per vedere stato stanza
+app.get('/api/room-status', (req, res) => {
+    res.json({
+        players: gameRoom.players.length,
+        gameStarted: gameRoom.gameStarted,
+        playerList: gameRoom.players.map(p => ({ name: p.name, character: p.character }))
+    });
+});
 
 const PORT = process.env.PORT || 3000;
 
